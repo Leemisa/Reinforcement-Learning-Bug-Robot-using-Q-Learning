@@ -31,5 +31,5 @@ Run each experiment across multiple learning episodes until behavior stabilizes.
 Record for each experiment:  
 - 🎥 Video clips of robot learning behavior.  
 - 📊 Metrics — number of episodes, convergence time, and cumulative rewards.  
-- 📈 Graphs comparing performance across experiments.  
+- 📈 Graphs comparing performance across experiments.
 
