@@ -1,0 +1,181 @@
+from hub import port, light_matrix
+import motor
+import runloop
+import random
+
+# SETTINGS – tuned for real forward walking
+LEGSPEED = 1000
+L_MID = 0
+L_FWD = 45
+C_LEVEL = 0
+C_UP = 150
+LEFT_LEGS = port.A
+TILT = port.C
+
+NUM_EPISODES = 20
+MAX_STEPS = 25
+ALPHA = 0.3
+GAMMA = 0.85
+EPSILON = 0.6
+
+states = ["left-up", "right-up", "right-down", "left-down"]
+actions = ["L-mid", "L-fwd", "C-level", "C-up"]
+state_idx = {"left-up":0, "right-up":1, "right-down":2, "left-down":3}
+
+Q = [[0.0, 0.0, 0.0, 0.0] for _ in range(4)]
+episode_rewards = []
+
+async def move_leg_mid():
+    await motor.run_to_absolute_position(LEFT_LEGS, L_MID, LEGSPEED)
+
+async def move_leg_fwd():
+    await motor.run_to_absolute_position(LEFT_LEGS, L_FWD, LEGSPEED)
+
+async def tilt_level():
+    await motor.run_to_absolute_position(TILT, C_LEVEL, LEGSPEED)
+
+async def tilt_up():
+    await motor.run_to_absolute_position(TILT, C_UP, LEGSPEED)
+
+action_funcs = [move_leg_mid, move_leg_fwd, tilt_level, tilt_up]
+
+# FIXED: Global variables for state tracking
+previous_leg = 0
+previous_tilt = 0
+previous_state = "left-down"# Now defined from the start!
+stuck_counter = 0
+
+def get_state():
+    global previous_leg, previous_tilt, previous_state, stuck_counter
+
+    lp = motor.absolute_position(LEFT_LEGS)
+    tp = motor.absolute_position(TILT)
+
+    # Better state detection with hysteresis
+    if tp > 80 and previous_leg < 20:
+        state = "left-up"
+    elif tp > 80 and previous_leg > 30:
+        state = "right-up"
+    elif tp < 40 and previous_leg > 30:
+        state = "right-down"
+    else:
+        state = "left-down"
+
+    # Anti-stuck: if same state too long → force change
+    if state == previous_state:
+        stuck_counter += 1
+        if stuck_counter > 3:
+            stuck_counter = 0
+            state = random.choice(["right-up", "left-down", "right-down"])
+    else:
+        stuck_counter = 0
+
+    previous_leg = lp
+    previous_tilt = tp
+    previous_state = state
+    return state
+
+async def train():
+    global EPSILON
+    await motor.run_to_absolute_position(LEFT_LEGS, 0, LEGSPEED)
+    await motor.run_to_absolute_position(TILT, 0, LEGSPEED)
+    await light_matrix.write("GO")
+
+    print("\n" + "="*80)
+    print("EXPERIMENT 1 - REAL FORWARD WALKING (FIXED!)")
+    print("GOAL: Learn a smooth walking gait from scratch")
+    print("="*80)
+
+    print("\nINITIAL Q-TABLE:")
+    print("State        |L-midL-fwdC-levelC-up")
+    print("-"*80)
+    for i in range(4):
+        row = "".join("{:7.2f}".format(Q[i][j]) for j in range(4))
+        print("{:13} | {}".format(states[i], row))
+    print("-"*80)
+
+    for episode in range(1, NUM_EPISODES + 1):
+        await motor.run_to_absolute_position(LEFT_LEGS, 0, LEGSPEED)
+        await motor.run_to_absolute_position(TILT, 0, LEGSPEED)
+        await runloop.sleep_ms(500)
+
+        state_name = "left-down"
+        total_reward = 0.0
+        cycle_count = 0
+
+        for step in range(MAX_STEPS):
+            s = state_idx[state_name]
+            if random.random() < EPSILON:
+                a = random.randint(0, 3)
+            else:
+                a = Q[s].index(max(Q[s]))
+
+            await action_funcs[a]()
+            await runloop.sleep_ms(250)
+
+            reward = 0
+            if state_name == "left-down" and a == 0:
+                reward = 3
+                cycle_count += 1
+            elif a == 1 and "down" in state_name:
+                reward = 2
+            elif a == 3 and "left" in state_name:
+                reward = 1
+            elif a == 2 and "right" in state_name:
+                reward = 1
+            else:
+                reward = -1
+
+            total_reward += reward
+            next_state = get_state()
+            Q[s][a] += ALPHA * (reward + GAMMA * max(Q[state_idx[next_state]]) - Q[s][a])
+            state_name = next_state
+
+        episode_rewards.append(total_reward)
+        EPSILON = max(0.1, EPSILON * 0.85)
+        await light_matrix.write(str(episode % 10))
+
+        print("\nEPISODE {0} - REWARD: {1:+} ({2} cycles)".format(episode, int(total_reward), cycle_count))
+        print("State        |L-midL-fwdC-levelC-up")
+        print("-"*80)
+        for i in range(4):
+            row = "".join("{:7.2f}".format(Q[i][j]) for j in range(4))
+            print("{:13} | {}".format(states[i], row))
+        print("-"*80)
+
+    await light_matrix.write("OK")
+    print("\nTRAINING DONE - STARTING SMOOTH WALK!")
+
+async def walk_forever():
+    print("\n" + "="*80)
+    print("NOW WALKING FORWARD FOREVER!")
+    print("LEARNED POLICY:")
+    for i in range(4):
+        best = Q[i].index(max(Q[i]))
+        print("{} -> {}".format(states[i], actions[best]))
+    print("="*80)
+
+    print("\nEpisode,Reward")
+    for i in range(len(episode_rewards)):
+        print("{},{}".format(i+1, int(episode_rewards[i])))
+
+    print("\nState,L-mid,L-fwd,C-level,C-up")
+    for i in range(4):
+        row = ",".join("{:.2f}".format(Q[i][j]) for j in range(4))
+        print("{},{}".format(states[i], row))
+
+    print("\nWALKING SMOOTHLY FOREVER - Press red STOP button to end")
+    print("="*80)
+
+    while True:
+        state = get_state()
+        s = state_idx[state]
+        best = Q[s].index(max(Q[s]))
+        await action_funcs[best]()
+        await runloop.sleep_ms(250)
+
+async def main():
+    await train()
+    await walk_forever()
+
+runloop.run(main())
