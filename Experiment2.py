@@ -1,4 +1,4 @@
-# ==================== EXPERIMENT 2 – LEARNS + WALKS FOREVER (REALLY!) ====================
+# ==================== EXPERIMENT 2 – PURE Q-LEARNING (ALL ZEROS) ====================
 
 from hub import port, light_matrix
 import motor
@@ -6,9 +6,9 @@ import runloop
 import random
 
 # YOUR PORTS
-LEFT_LEGS= port.A
+LEFT_LEGS  = port.A
 RIGHT_LEGS = port.B
-TILT    = port.C
+TILT       = port.C
 
 # POSITIONS
 L_MID = 0
@@ -32,32 +32,23 @@ states = [
     "3 Lmid Rmid Rup",
     "4 Lmid Rfdw Rup",
     "5 Lmid Rfdw Lup",
-    "6 Lmid Rmid Lup",
+    "6 Lmid Rmid Lup",   # Full cycle complete
     "7 STUCK"
 ]
 
 actions = ["Lup", "Rup", "Lfwd", "Lmid", "Rfwd", "Rmid"]
 
-# YOUR INITIAL Q-TABLE (one 1 per row)
-Q = [
-    [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-    [0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
-    [0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-    [0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-    [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-    [0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
-    [0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
-    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-]
+# PURE ZERO Q-TABLE – TRUE LEARNING FROM SCRATCH
+Q = [[0.0 for _ in range(6)] for _ in range(8)]
 
 episode_rewards = []
 
-async def do_Lup():await motor.run_to_absolute_position(TILT, C_UP, SPEED)
-async def do_Rup():await motor.run_to_absolute_position(TILT, C_LEVEL, SPEED)
-async def do_Lfwd():await motor.run_to_absolute_position(LEFT_LEGS, L_FWD, SPEED)
-async def do_Lmid():await motor.run_to_absolute_position(LEFT_LEGS, L_MID, SPEED)
-async def do_Rfwd():await motor.run_to_absolute_position(RIGHT_LEGS, R_FWD, SPEED)
-async def do_Rmid():await motor.run_to_absolute_position(RIGHT_LEGS, R_MID, SPEED)
+async def do_Lup():   await motor.run_to_absolute_position(TILT, C_UP, SPEED)
+async def do_Rup():   await motor.run_to_absolute_position(TILT, C_LEVEL, SPEED)
+async def do_Lfwd():  await motor.run_to_absolute_position(LEFT_LEGS, L_FWD, SPEED)
+async def do_Lmid():  await motor.run_to_absolute_position(LEFT_LEGS, L_MID, SPEED)
+async def do_Rfwd():  await motor.run_to_absolute_position(RIGHT_LEGS, R_FWD, SPEED)
+async def do_Rmid():  await motor.run_to_absolute_position(RIGHT_LEGS, R_MID, SPEED)
 
 action_funcs = [do_Lup, do_Rup, do_Lfwd, do_Lmid, do_Rfwd, do_Rmid]
 
@@ -70,28 +61,28 @@ def get_state():
     l_fwd = lp > 20
     r_mid = abs(rp - R_MID) < 25
     r_fwd = rp < -20
-    c_up= tp > 80
+    c_up  = tp > 80
 
-    if l_mid and r_mid and c_up:return 0
-    if l_fwd and r_mid and c_up:return 1
+    if l_mid and r_mid and c_up:   return 0
+    if l_fwd and r_mid and c_up:   return 1
     if l_fwd and r_mid and not c_up: return 2
     if l_mid and r_mid and not c_up: return 3
     if l_mid and r_fwd and not c_up: return 4
-    if l_mid and r_fwd and c_up:return 5
-    if l_mid and r_mid and c_up:return 6
+    if l_mid and r_fwd and c_up:   return 5
+    if l_mid and r_mid and c_up:   return 6
     return 7
 
 def print_q_table(episode_num):
     print("\n" + "="*100)
     if episode_num == 0:
-        print("INITIAL Q-TABLE")
+        print("INITIAL Q-TABLE – ALL ZEROS (TRUE LEARNING FROM SCRATCH)")
     else:
-        print("EPISODE {} – REWARD: {:+} | ON HUB: {}".format(
+        print("EPISODE {} – TOTAL REWARD: {:+} | ON HUB: {}".format(
             episode_num, int(episode_rewards[-1]), episode_num))
-    print("State                |LupRup Lfwd Lmid Rfwd Rmid")
+    print("State                 |  Lup  Rup Lfwd Lmid Rfwd Rmid")
     print("-"*100)
     for i in range(8):
-        row = "".join("{:5.2f}".format(Q[i][j]) for j in range(6))
+        row = "  ".join("{:5.2f}".format(Q[i][j]) for j in range(6))
         print("{:20} | {}".format(states[i], row))
     print("-"*100)
 
@@ -126,12 +117,13 @@ async def train():
 
             next_state = get_state()
             reward = 0
+
             if state == 0 and next_state == 6:
                 reward = 10
                 cycle_count += 1
             elif next_state == 6:
                 reward = 5
-            elif a in [2, 4]:
+            elif a in [2, 4]:           # Lfwd or Rfwd = forward leg move
                 reward = 1
             elif next_state == 7:
                 reward = -3
@@ -142,16 +134,16 @@ async def train():
 
         episode_rewards.append(total_reward)
         EPSILON = max(0.1, EPSILON * 0.9)
+
         await light_matrix.write(str(episode % 10))
         print_q_table(episode)
 
     await light_matrix.write("OK")
-    print("\nTRAINING DONE → NOW WALKING FOREVER!")
+    print("\nTRAINING FINISHED → NOW WALKING FOREVER!")
 
-# FIXED: Now uses await so it really walks forever!
 async def walk_forever():
     print("\n" + "="*100)
-    print("WALKING FOREVER WITH LEARNED 8-PHASE GAIT!")
+    print("FINAL LEARNED POLICY – WALKING FOREVER!")
     for i in range(8):
         best = Q[i].index(max(Q[i]))
         print("{} → {}".format(states[i], actions[best]))
@@ -162,9 +154,8 @@ async def walk_forever():
         if state == 7:
             state = 0
         best = Q[state].index(max(Q[state]))
-
-        await action_funcs[best]()    # ← THIS AWAIT WAS MISSING BEFORE!
-        await runloop.sleep_ms(280)# Smooth natural pace
+        await action_funcs[best]()      # await = walks forever!
+        await runloop.sleep_ms(280)
 
 async def main():
     await train()
