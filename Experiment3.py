@@ -1,223 +1,206 @@
-# ==================== EXPERIMENT 3 – WALK TO OBJECT & STOP AT ~60mm (USING .format() ONLY) ====================
-
-from hub import port, light_matrix
-import motor
 import runloop
+import motor
+import distance_sensor
+from hub import light_matrix, port
+from app import sound
 import random
 
-# =================================== HARDWARE ===================================
-MOTOR_SPEED = 1000
-LEFT_LEG_MOTOR= port.A
-RIGHT_LEG_MOTOR = port.B
-BODY_TILT_MOTOR = port.C
-DISTANCE_SENSOR = port.F                            # Ultrasonic sensor facing forward
+# ========================================
+# EXPERIMENT 3 – 8-STATE BIPED WALKER (NOT SEEDED)
+# All Q-values start at 0.0 → learns from scratch
+# Start distance: 150–200 mm
+# Gentle rewards, epsilon decays, safe leg speed
+# ========================================
 
-LEG_MIDDLE    = 0
-LEG_FORWARD    = 50
-LEG_BACKWARD= -50
-BODY_UP        = 140
-BODY_DOWN    = 0
+ALPHA = 0.5           # Learning rate
+GAMMA = 0.95          # Discount factor
+EPSILON_START = 0.9   # High exploration at start
+EPSILON_END = 0.05    # Low exploration at end
+EPSILON_DECAY = 0.95  # Decay per episode
+EPISODES = 40
+MAX_STEPS = 50
+SPEED = 950
+SLEEP = 150
 
-# =================================== PARAMETERS ===================================
-NUM_EPISODES= 40
-MAX_STEPS    = 45
-LEARNING_RATE= 0.55
-DISCOUNT    = 0.9
-EXPLORATION    = 0.8
+# Motor target positions (degrees)
+Lmid, Lfwd = 0, 60     # Left leg: middle and forward
+Rmid, Rfwd = 0, 60     # Right leg: middle and forward
+Lup, Rup   = 140, -140 # Body lift: left-tilt and right-tilt
 
-# =================================== STATES ===================================
-states = [
-    "0 Lmid Rmid Lup",
-    "1 Lfwd Rmid Lup",
-    "2 Lfwd Rmid Rup",
-    "3 Lmid Rmid Rup",
-    "4 Lmid Rfdw Rup",
-    "5 Lmid Rfdw Lup",
-    "6 Lmid Rmid Lup",
-    "7 STUCK"
-]
+# 6 possible actions
+ACTIONS = ["Lup", "Rup", "Lfwd", "Lmid", "Rfwd", "Rmid"]
 
-actions = ["A.Lfwd", "C.Rup", "A.Lmid", "B.Rfwd", "C.Lup", "B.Rmid"]
+old_dist = 999  # Global variable to track previous distance
 
-# =================================== ACTION FUNCTIONS ===================================
-async def a_lfwd(): await motor.run_to_absolute_position(LEFT_LEG_MOTOR, 50, MOTOR_SPEED)
-async def c_rup():await motor.run_to_absolute_position(BODY_TILT_MOTOR, BODY_DOWN, MOTOR_SPEED)
-async def a_lmid(): await motor.run_to_absolute_position(LEFT_LEG_MOTOR, 0, MOTOR_SPEED)
-async def b_rfwd(): await motor.run_to_absolute_position(RIGHT_LEG_MOTOR, -50, MOTOR_SPEED)
-async def c_lup():await motor.run_to_absolute_position(BODY_TILT_MOTOR, BODY_UP, MOTOR_SPEED)
-async def b_rmid(): await motor.run_to_absolute_position(RIGHT_LEG_MOTOR, 0, MOTOR_SPEED)
-
-action_functions = [a_lfwd, c_rup, a_lmid, b_rfwd, c_lup, b_rmid]
-
-# =================================== Q-TABLE & STATS ===================================
-Q = [[0.0] * 6 for _ in range(8)]
-episode_stats = []
-
-# =================================== STATE DETECTION ===================================
-def get_current_state():
-    lp = motor.absolute_position(LEFT_LEG_MOTOR)
-    rp = motor.absolute_position(RIGHT_LEG_MOTOR)
-    tp = motor.absolute_position(BODY_TILT_MOTOR)
-
-    l_mid = abs(lp) < 30
-    l_fwd = lp > 20
-    r_mid = abs(rp) < 30
-    r_fwd = rp < -20
-    body_up = tp > 80
-
-    if l_mid and r_mid and body_up:    return 0
-    if l_fwd and r_mid and body_up:    return 1
-    if l_fwd and r_mid and not body_up: return 2
-    if l_mid and r_mid and not body_up: return 3
-    if l_mid and r_fwd and not body_up: return 4
-    if l_mid and r_fwd and body_up:    return 5
-    if l_mid and r_mid and body_up:    return 6
-    return 7
-
-# =================================== DISTANCE SENSOR ===================================
-def get_distance_mm():
-    try:
-        d = DISTANCE_SENSOR.distance()
-        return d if d is not None else 999
-    except:
+def safe_dist():
+    """Read distance sensor safely. Returns 999 if object lost."""
+    global old_dist
+    d = distance_sensor.distance(port.F)
+    if d is None or d <= 0 or d > 1000:
         return 999
+    old_dist = d
+    return d
 
-def get_distance_reward(d):
-    if d < 30:        return -100.0
-    if 50 <= d <= 70:return +120.0
-    if 70 < d <= 120:return +30.0
-    if 120 < d <= 250:return +5.0
-    return -15.0
+def get_state():
+    """Return current state (0–7) based on leg and body positions."""
+    a = motor.absolute_position(port.A) or 0  # Left leg
+    b = motor.absolute_position(port.B) or 0  # Right leg
+    c = motor.absolute_position(port.C) or 0  # Body tilt
 
-# =================================== SHOW EPISODE ON MATRIX ===================================
-def show_episode_number(ep):
-    if ep <= 9:
-        light_matrix.write(str(ep))
-    else:
-        tens = ep // 10
-        ones = ep % 10
-        light_matrix.write(str(tens))
-        runloop.sleep_ms(700)
-        light_matrix.write(str(ones))
+    left_mid  = abs(a - Lmid) < 45
+    left_fwd  = abs(a - Lfwd) < 45
+    right_mid = abs(b - Rmid) < 45
+    right_fwd = abs(b - Rfwd) < 45
+    body_up   = c > 80 or c < -80          # Tilted up (lifting)
+    body_down = abs(c) < 85                # Flat on ground
 
-# =================================== PRINT FULL Q-TABLE ===================================
-def print_full_q_table(episode_num):
-    print("\n" + "="*120)
-    print("EPISODE {} COMPLETE – FULL Q-TABLE".format(episode_num))
-    print("="*120)
-    print("State            |A.LfwdC.RupA.LmidB.RfwdC.LupB.Rmid| Best Action")
-    print("-"*120)
-    for i in range(8):
-        row = "".join("{:8.3f}".format(Q[i][j]) for j in range(6))
-        best_act = actions[Q[i].index(max(Q[i]))]
-        print("{:19} | {}→{}".format(states[i], row, best_act))
-    print("-"*120)
+    if body_up and left_fwd and right_mid:      return 0
+    if body_up and right_fwd and left_mid:      return 1
+    if body_down and left_mid and right_mid:    return 2
+    if body_down and left_fwd and right_mid:    return 3
+    if body_down and right_fwd and left_mid:    return 4
+    if body_up and left_mid and right_mid:      return 5
+    if body_down and left_fwd and right_fwd:    return 6
+    return 7  # Recovery / unknown state
 
-# =================================== TRAINING ===================================
-async def train():
-    global EXPLORATION
+async def move(action):
+    """Execute one of the 6 actions."""
+    if action == 0:   await motor.run_to_absolute_position(port.C, Lup, SPEED)     # Tilt body left
+    elif action == 1: await motor.run_to_absolute_position(port.C, Rup, SPEED)     # Tilt body right
+    elif action == 2: await motor.run_to_absolute_position(port.A, Lfwd, int(SPEED * 0.5))  # Left leg forward (slow)
+    elif action == 3: await motor.run_to_absolute_position(port.A, Lmid, int(SPEED * 0.5))  # Left leg middle
+    elif action == 4: await motor.run_to_absolute_position(port.B, Rfwd, int(SPEED * 0.5))  # Right leg forward
+    elif action == 5: await motor.run_to_absolute_position(port.B, Rmid, int(SPEED * 0.5))  # Right leg middle
+    await runloop.sleep_ms(SLEEP)
 
-    await motor.run_to_absolute_position(LEFT_LEG_MOTOR, 0, MOTOR_SPEED)
-    await motor.run_to_absolute_position(RIGHT_LEG_MOTOR, 0, MOTOR_SPEED)
-    await motor.run_to_absolute_position(BODY_TILT_MOTOR, 0, MOTOR_SPEED)
+async def reset():
+    """Return robot to safe starting position."""
+    await motor.run_to_absolute_position(port.C, 0, SPEED)      # Center body first
+    await runloop.sleep_ms(600)
+    await motor.run_to_absolute_position(port.A, Lmid, int(SPEED * 0.5))
+    await runloop.sleep_ms(500)
+    await motor.run_to_absolute_position(port.B, Rmid, int(SPEED * 0.5))
+    await runloop.sleep_ms(700)
+
+async def print_q_table(Q, title):
+    """Print the full 8×6 Q-table nicely."""
+    print("\n" + "=" * 100)
+    print("{0}".format(title).center(100))
+    print("=" * 100)
+    header = "State |" + "".join(" {0:>7}".format(act) for act in ACTIONS)
+    print(header)
+    print("-" * 100)
+    for s in range(8):
+        row = "{0:5d} |".format(s)
+        for val in Q[s]:
+            row += " {0:7.2f}".format(val)
+        print(row)
+    print("-" * 100)
+
+async def main():
+    global old_dist
+
+    print("\n" + "="*100)
+    print(" EXPERIMENT 3 – NOT SEEDED (ALL ZEROS) ".center(100))
+    print(" Start: 150–200 mm | Gentle rewards | Epsilon decay ".center(100))
+    print("="*100)
+
+    await reset()
     await light_matrix.write("E3")
-    await runloop.sleep_ms(1000)
-    print_full_q_table(0)
 
-    for episode in range(1, NUM_EPISODES + 1):
-        await motor.run_to_absolute_position(LEFT_LEG_MOTOR, 0, MOTOR_SPEED)
-        await motor.run_to_absolute_position(RIGHT_LEG_MOTOR, 0, MOTOR_SPEED)
-        await motor.run_to_absolute_position(BODY_TILT_MOTOR, 0, MOTOR_SPEED)
-        await runloop.sleep_ms(1000)
+    # Wait for correct starting distance
+    print("Place target 150–200 mm away...")
+    while True:
+        d = safe_dist()
+        if 150 <= d <= 200:
+            print("Good starting distance: {0} mm".format(d))
+            break
+        await runloop.sleep_ms(500)
 
-        show_episode_number(episode)
+    # NOT SEEDED – everything starts at zero
+    Q = [[0.0 for _ in range(6)] for _ in range(8)]
 
-        state = 0
-        total_reward = 0.0
-        cycles = 0
-        final_dist = 999
+    await print_q_table(Q, "INITIAL Q-TABLE (ALL ZEROS)")
 
-        for _ in range(MAX_STEPS):
-            if random.random() < EXPLORATION:
-                a = random.randint(0, 5)
+    epsilon = EPSILON_START
+    csv_data = []
+
+    for ep in range(1, EPISODES + 1):
+        await reset()
+        s = get_state()
+        old_dist = safe_dist()
+        start_dist = old_dist
+        total_reward = 0
+        steps = 0
+        goal_reached = False
+
+        print("\nEPISODE {0} | EPSILON = {1:.4f}".format(ep, epsilon))
+
+        for t in range(1, MAX_STEPS + 1):
+            steps = t
+
+            # Epsilon-greedy action selection
+            if random.random() < epsilon:
+                a = random.randint(0, 5)  # Explore
             else:
-                a = Q[state].index(max(Q[state]))
+                best_q = max(Q[s])
+                best_actions = [i for i, q in enumerate(Q[s]) if q == best_q]
+                a = random.choice(best_actions)  # Exploit
 
-            await action_functions[a]()
-            await runloop.sleep_ms(380)
+            await move(a)
 
-            next_state = get_current_state()
-            dist = get_distance_mm()
-            final_dist = dist
+            ns = get_state()
+            new_d = safe_dist()
+            delta = old_dist - new_d
 
-            gait_reward = 2.0 if a in [0, 3] else 0.0
-            if state == 0 and next_state == 6:
-                gait_reward += 15.0
-                cycles += 1
+            # Gentle reward function
+            r = 0
+            if new_d >= 999:
+                r -= 20
+                print("     LOST SIGHT! -20")
+            elif delta > 0:
+                r += min(20, delta)
+                if delta >= 10:
+                    print("     Good progress +{0}".format(min(20, delta)))
+            elif delta < 0:
+                r += max(-8, delta)
+            else:
+                r -= 2
 
-            dist_reward = get_distance_reward(dist)
-            reward = gait_reward + dist_reward
-            total_reward += reward
+            if s in [0, 1] and ns == 2:
+                r += 10
+                print("     FULL GAIT CYCLE! +10")
 
-            td = reward + DISCOUNT * max(Q[next_state]) - Q[state][a]
-            Q[state][a] += LEARNING_RATE * td
+            if new_d < 85:
+                r += 50
+                goal_reached = True
+                print("     GOAL REACHED! +50")
 
-            state = next_state
+            total_reward += r
+            Q[s][a] += ALPHA * (r + GAMMA * max(Q[ns]) - Q[s][a])
 
-            if 50 <= dist <= 70:
-                total_reward += 80
+            if goal_reached:
+                print("\nSUCCESS IN {0} STEPS! Reward = {1}".format(steps, total_reward))
+                await light_matrix.write("WIN")
+                sound.play(3000, 1500)
                 break
 
-        success = "YES" if 50 <= final_dist <= 70 else "NO "
-        episode_stats.append((episode, round(total_reward,1), cycles, final_dist, success))
-        EXPLORATION = max(0.1, EXPLORATION * 0.95)
+            s = ns
+            old_dist = new_d
 
-        print_full_q_table(episode)
-        print(">>> EPISODE {:2d} | Reward: {:+6.1f} | Cycles: {:2d} | Dist: {:4d}mm | SUCCESS: {}".format(
-            episode, total_reward, cycles, final_dist, success))
+        csv_data.append([ep, total_reward, steps, round(epsilon, 5)])
+        epsilon = max(EPSILON_END, epsilon * EPSILON_DECAY)
 
-    await light_matrix.write("OK")
+        await print_q_table(Q, "Q-TABLE AFTER EPISODE {0}".format(ep))
+        await light_matrix.write(str(ep % 10))
 
-# =================================== FINAL WALK ===================================
-async def walk_to_object():
-    print("\n" + "="*120)
-    print("FINAL LEARNED POLICY – APPROACH & STOP AT 60mm")
-    print("="*120)
-    for i in range(7):
-        best = actions[Q[i].index(max(Q[i]))]
-        print("{:19} → {}".format(states[i], best))
-    print("="*120)
+    # Final results
+    print("\n" + "="*80)
+    print(" TRAINING COMPLETE – NOT SEEDED ".center(80))
+    print("Episode,Reward,Cycles,Epsilon")
+    for row in csv_data:
+        print("{0},{1},{2},{3}".format(row[0], row[1], row[2], row[3]))
 
-    print("\nCSV DATA:")
-    print("Episode,Reward,Cycles,Final_Distance_mm,Success")
-    for ep, r, c, d, s in episode_stats:
-        print("{},{},{},{},{}".format(ep, r, c, d, s))
-    print("="*120)
-
-    print("\nAPPROACHING OBJECT...")
-    await light_matrix.write("GO")
-    while True:
-        s = get_current_state()
-        if s == 7: s = 0
-        a = Q[s].index(max(Q[s]))
-        await action_functions[a]()
-        await runloop.sleep_ms(330)
-
-        dist = get_distance_mm()
-        print("Distance: {} mm".format(dist if dist < 1000 else ">1000"))
-
-        if 50 <= dist <= 70:
-            print("SUCCESS! Stopped safely at {} mm".format(dist))
-            await light_matrix.write("OK")
-            break
-        if dist < 30:
-            print("COLLISION at {} mm!".format(dist))
-            await light_matrix.write("NO")
-            break
-
-# =================================== MAIN ===================================
-async def main():
-    await train()
-    await walk_to_object()
+    await light_matrix.write("E3")
 
 runloop.run(main())
