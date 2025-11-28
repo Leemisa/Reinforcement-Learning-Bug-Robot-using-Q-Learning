@@ -8,8 +8,8 @@ import numpy as np
 from datetime import datetime
 
 # === CHANGE THIS TO YOUR EXPERIMENT NAME ===
-EXPERIMENT_NAME = "Experiment 2"
-CSV_FILE = "Experiment 2.csv"   # ← Paste your robot's CSV output here!
+EXPERIMENT_NAME = "Experiment 3"
+CSV_FILE = "Experiment 3.csv"   # ← Paste your robot's CSV output here!
 
 # Load data (copy-paste from robot terminal into a file)
 df = pd.read_csv(CSV_FILE)
